@@ -32,7 +32,7 @@
 #	NOTES:  ---
 #       AUTHOR:  alkz
 #      COMPANY:  faggotree
-#      VERSION:  0.2
+#      VERSION:  0.7
 #      CREATED:  01/11/2011 23:36:35
 #     REVISION:  ---
 #      LICENCE:  GNU GPL v.3
@@ -44,59 +44,64 @@ import email
 import sys
 import os
 import signal
+import pprint
 
 
+#===============================================================================
 
-if (len(sys.argv) < 2):
-    print "Gimme the .conf file FAG"
-    print "Usage: python pyFagMail.py <confFile>"
-    sys.exit(-1)
+def getContent(msg):
+    s = ''
+    try:
+        if (msg['Content-type'].find('multipart') >= 0):
+            for p in msg.walk():
+                if(p.get_content_type() == 'text/plain'):
+                    s += p.get_payload()
+        else:
+            s += msg.get_payload()
+    except:
+        pass    
 
-f = file(sys.argv[1], 'r')
-s = f.read()
-l = s.split('\n')
-
-conf = {}
-for e in l:
-    if (e != ''):
-        tmp = e.split()
-        conf[tmp[0].strip()] = tmp[1].strip()
-
-
-
-Colors = {  
-            'RED': '\033[31m',
-            'BLINK': '\033[5m',
-            'LIGHTBLUE': '\033[1;34m',
-            'ENDC': '\033[0m'
-         }
-choice = 0
-
+    return s
 
 
 def getMails(imap, total):
     global conf
 
+    newdata = imap.search(None, "UNSEEN")[1][0].split(" ")
     mails = []
-    for n in range( int(conf['n_emails']) ):
-        curr = imap.fetch(total-n, '(RFC822)')[1][0][1]
-        msg = email.message_from_string(curr)
-        s = ''
-        try:
-            if (msg['Content-type'].find('multipart') >= 0):
-                for p in msg.walk():
-                    if(p.get_content_type() == 'text/plain'):
-                        s += p.get_payload()
-            else:
-                s += msg.get_payload()
-        except:
-            pass    
 
-        msg['Content'] = s
+    if(newdata[0] == ''):
+        len_newdata = 0
+    else:
+        len_newdata = len(newdata)
+
+    # scan already seen
+    for n in range( int(conf['n_emails'])-len_newdata ):
+        curr = imap.fetch(total-n-len_newdata, 'RFC822')[1][0][1]
+        msg = email.message_from_string(curr)
+        msg['Content'] = getContent(msg)
+        msg['read'] = True
+        msg['id'] = total-n-len_newdata 
+
         mails.append(msg)
 
-    return mails 
 
+    if(len_newdata > int(conf['n_emails'])):
+        maxlen = int(conf['n_emails'])
+    else:
+        maxlen = len_newdata
+
+    # scan newdata
+    for i in range(maxlen):
+        curr = imap.fetch(int(newdata[i]), 'RFC822')[1][0][1]
+        msg = email.message_from_string(curr)
+        msg['Content'] = getContent(msg)
+        msg['read'] = False
+        msg['id'] = int(newdata[i])
+
+        mails.insert(0,msg)
+
+    return mails 
 
 
 def adjustS(s):
@@ -120,20 +125,38 @@ def getInput():
         return raw_input()
     except:
         pass
-    return
-
-    
 
 
 #===============================================================================
 
+Colors = {  
+            'RED': '\033[31m',
+            'BLINK': '\033[5m',
+            'LIGHTBLUE': '\033[1;34m',
+            'ENDC': '\033[0m'
+         }
+
+
+if (len(sys.argv) < 2):
+    print "Gimme the .conf file FAG"
+    print "Usage: python pyFagMail.py <confFile>"
+    sys.exit(-1)
+
+f = file(sys.argv[1], 'r')
+s = f.read()
+l = s.split('\n')
+
+conf = {}
+for e in l:
+    if (e != ''):
+        tmp = e.split()
+        conf[tmp[0].strip()] = tmp[1].strip()
 
 
 signal.signal(signal.SIGALRM, getInput)
 
-print ("Connecting..."),
-
 try:
+    print ("Connecting..."),
     sock = imaplib.IMAP4_SSL(conf['imap'], int(conf['port']))
     sock.login(conf['account'], conf['psw'])
 except:
@@ -147,48 +170,55 @@ mails = getMails(sock, prev)
 
 
 while (1):
-
     changed = False
-    num = int(sock.select(conf['mailbox'])[1][0])
 
-    if (num != prev):
-        diff = num - prev
-        prev = num
-        changed = True
-        mails = getMails(sock, num)
-    
-    os.system('clear')
     print "# Last " + conf['n_emails'] + " Emails #\n"
+
     i = 0
     for mail in mails:
         toPrint = "From: " + mail['From'] + " | Subject: " + mail['Subject'] + " | Date: " + mail['Date']
         toPrint = adjustS(toPrint)
-        if (changed and diff):
+        if(mail['read'] == False):
             print "[" + str(i) + "]" + " - " + Colors['LIGHTBLUE'] + Colors['BLINK'] + toPrint[:len(toPrint)-5] + Colors['RED'] + " NEW!" + Colors['ENDC'] 
-            diff -= 1
+            # set seen only if watch content
+            sock.store(mail['id'], '-FLAGS', '\\Seen')
         else:
             print "[" + str(i) + "]" + " - " + toPrint
+
         i += 1
     
     if not changed:
         signal.alarm(int(conf['refresh']))
         choice = getInput()
         signal.alarm(0)
-    else:
-        choice = getInput()
-        
+
+    num = int(sock.select(conf['mailbox'])[1][0])
+
+    if (num != prev):
+        mails = getMails(sock, num)
+        prev = num
+        changed = True
+    
     if (choice == 'e'):
         sock.logout()
         sys.exit(0)
-
     elif(choice == '\n' or choice == '' or choice == None):
         continue
-
-    elif (int(choice) < int(conf['n_emails']) and int(choice) >= 0):
-        os.system('clear')
-        tmpF = open("tmpF", "w")
-        print >> tmpF, mails[int(choice)]['Content']
-        os.system("more tmpF")
-        raw_input()
-
-    
+    else:
+        try:
+            if( (int(choice) < int(conf['n_emails'])) and (int(choice) >= 0) ):
+                os.system('clear')
+                tmpF = open("tmpF", "w")
+                tmpF.truncate()
+                mail = mails[int(choice)]
+                s = "From: " + mail['From'] + " \nSubject: " + mail['Subject'] + "\nDate: " + mail['Date'] + "\n\n" + mail['Content']
+                tmpF.write(s)
+                tmpF.flush()
+                tmpF.close()
+                os.system("more tmpF")
+                sock.store(mail['id'], '+FLAGS', '\\Seen')
+                del mails[int(choice)]['read']
+                mails[int(choice)]['read'] = True
+                raw_input()
+        except:
+            pass
